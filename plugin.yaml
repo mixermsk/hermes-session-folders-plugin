@@ -1,0 +1,5 @@
+manifest_version: 2
+name: session-folders
+version: 0.2.0
+description: Durable chat folders for Hermes Desktop.
+kind: standalone

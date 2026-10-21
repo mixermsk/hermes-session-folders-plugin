@@ -1,8 +1,8 @@
 /**
  * Session Folders — ChatGPT-style conversation folders for Hermes Desktop.
  *
- * Second left-column tab next to Sessions (Bots dock pattern). Membership is
- * local (`ctx.storage`); does not touch cwd or core Projects. Install:
+ * Second left-column tab next to Sessions (Bots dock pattern). Folder state is
+ * stored by the bundled plugin backend; legacy `ctx.storage` is migrated once.
  *   cp -R . ~/.hermes/desktop-plugins/session-folders
  * Folder name must equal plugin id (`session-folders`).
  */
@@ -39,9 +39,11 @@ const ACP_FOLDER_NAME = 'ACP'
 
 /** @type {null | { get: Function, set: Function, remove: Function }} */
 let _storage = null
+let _rest = null
 
-function setStorage(storage) {
-  _storage = storage
+function setPersistence(ctx) {
+  _storage = ctx.storage
+  _rest = ctx.rest
 }
 
 function scopeProfile(profile) {
@@ -97,7 +99,7 @@ function parseScopeRaw(raw) {
   return { folders, membership, expanded }
 }
 
-function loadScope(profile, connectionId) {
+function loadLocalScope(profile, connectionId) {
   if (!_storage) return emptyState()
 
   const canonical = storageKey(profile)
@@ -115,20 +117,51 @@ function loadScope(profile, connectionId) {
     if (!raw || typeof raw !== 'object') continue
     const parsed = parseScopeRaw(raw)
     if (!parsed.folders.length && !Object.keys(parsed.membership).length) continue
-    saveScope(profile, parsed)
+    saveLocalScope(profile, parsed)
     return parsed
   }
 
   return parseScopeRaw(direct)
 }
 
-function saveScope(profile, state) {
+function saveLocalScope(profile, state) {
   if (!_storage) return
   _storage.set(storageKey(profile), {
     folders: state.folders,
     membership: state.membership,
     expanded: state.expanded
   })
+}
+
+function hasState(state) {
+  return state.folders.length > 0 || Object.keys(state.membership).length > 0
+}
+
+async function loadScope(profile, connectionId) {
+  const local = loadLocalScope(profile, connectionId)
+  if (typeof _rest !== 'function') return local
+
+  try {
+    const remote = parseScopeRaw(await _rest('/state'))
+    if (hasState(remote) || !hasState(local)) return remote
+    await _rest('/state', { method: 'PUT', body: local })
+    return local
+  } catch (err) {
+    console.warn('[session-folders] durable storage unavailable; using legacy local storage', err)
+    return local
+  }
+}
+
+async function saveScope(profile, state) {
+  if (typeof _rest === 'function') {
+    try {
+      await _rest('/state', { method: 'PUT', body: state })
+      return
+    } catch (err) {
+      console.warn('[session-folders] durable storage write failed; using legacy local storage', err)
+    }
+  }
+  saveLocalScope(profile, state)
 }
 
 function emptyState() {
@@ -188,19 +221,6 @@ async function fetchSessions(profile, connectionId) {
       source: s.source || ''
     }))
     .sort((a, b) => b.last_active - a.last_active)
-}
-
-function gcMembership(membership, sessionIds) {
-  const live = new Set(sessionIds)
-  let changed = false
-  const next = { ...membership }
-  for (const id of Object.keys(next)) {
-    if (!live.has(id)) {
-      delete next[id]
-      changed = true
-    }
-  }
-  return changed ? next : membership
 }
 
 function isAcpSession(session) {
@@ -763,7 +783,8 @@ function FoldersPane() {
   const connectionId = useValue(host.state.connectionId || FALLBACK_ATOM) || 'local'
   const profileKey = scopeProfile(profile)
 
-  const [state, setState] = useState(() => loadScope(profile, connectionId))
+  const [state, setState] = useState(emptyState)
+  const [stateReady, setStateReady] = useState(false)
   const [query, setQuery] = useState('')
   const [dragSessionId, setDragSessionId] = useState(null)
   const [dragFolderId, setDragFolderId] = useState(null)
@@ -777,14 +798,24 @@ function FoldersPane() {
   const renameInputRef = useRef(null)
 
   useEffect(() => {
-    setState(loadScope(profile, connectionId))
+    let cancelled = false
+    setStateReady(false)
+    void loadScope(profile, connectionId).then(next => {
+      if (!cancelled) {
+        setState(next)
+        setStateReady(true)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
   }, [profileKey, connectionId])
 
   const persist = useCallback(
     updater => {
       setState(prev => {
         const next = typeof updater === 'function' ? updater(prev) : updater
-        saveScope(profile, next)
+        void saveScope(profile, next)
         return next
       })
     },
@@ -798,18 +829,13 @@ function FoldersPane() {
     refetchOnWindowFocus: true
   })
 
-  // Drop stale membership only after a successful non-empty fetch — an empty
-  // list while loading (or before connectionId settles) used to wipe folders.
-  // Also auto-file ACP sessions into an "ACP" folder (created if needed).
+  // Never delete membership from a partial session-list response. The backend
+  // may cap that response, while saved memberships must survive indefinitely.
+  // Auto-file ACP sessions only after durable state has loaded.
   useEffect(() => {
-    if (!isSuccess || sessions.length === 0) return
-    const ids = sessions.map(s => s.id)
-    persist(prev => {
-      const cleaned = gcMembership(prev.membership, ids)
-      const base = cleaned === prev.membership ? prev : { ...prev, membership: cleaned }
-      return ensureAcpAutoFile(base, sessions)
-    })
-  }, [sessions, isSuccess, persist])
+    if (!stateReady || !isSuccess || sessions.length === 0) return
+    persist(prev => ensureAcpAutoFile(prev, sessions))
+  }, [sessions, isSuccess, persist, stateReady])
 
   useEffect(() => {
     if (creating) newInputRef.current?.focus?.()
@@ -1300,10 +1326,10 @@ export default {
   id: PLUGIN_ID,
   name: 'Session Folders',
   description:
-    'ChatGPT-style conversation folders in a tab next to Sessions. Drag sessions into folders; membership stays local.',
+    'ChatGPT-style conversation folders in a tab next to Sessions. Folder state is stored durably per Hermes profile.',
   defaultEnabled: true,
   register(ctx) {
-    setStorage(ctx.storage)
+    setPersistence(ctx)
 
     ctx.register({
       id: 'pane',

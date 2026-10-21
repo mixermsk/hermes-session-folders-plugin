@@ -1,0 +1,9 @@
+{
+  "name": "session-folders",
+  "label": "Session Folders",
+  "description": "Durable folder state for the Session Folders desktop plugin.",
+  "icon": "Folder",
+  "version": "0.2.0",
+  "tab": { "hidden": true },
+  "api": "plugin_api.py"
+}
