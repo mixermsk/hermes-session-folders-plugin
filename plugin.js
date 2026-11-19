@@ -194,29 +194,40 @@ function matchesQuery(session, q) {
   return hay.includes(q)
 }
 
-async function fetchSessions(profile, connectionId) {
+export async function fetchSessions(profile, connectionId, query = '') {
   const api = typeof window !== 'undefined' ? window.hermesDesktop?.api : null
+  const searchQuery = String(query || '').trim()
   let res
   if (typeof api === 'function') {
-    const params = new URLSearchParams({ limit: String(LIST_LIMIT) })
+    const params = searchQuery
+      ? new URLSearchParams({ q: searchQuery, limit: String(LIST_LIMIT) })
+      : new URLSearchParams({ limit: String(LIST_LIMIT) })
     const prof = String(profile || '').trim()
     if (prof) params.set('profile', prof)
-    const request = { path: `/api/sessions?${params}` }
+    const request = { path: `${searchQuery ? '/api/sessions/search' : '/api/sessions'}?${params}` }
     const conn = String(connectionId || '').trim()
     if (conn) request.connectionId = conn
     res = await api(request)
   } else {
     res = await host.request('session.list', { limit: LIST_LIMIT })
   }
-  const rows = Array.isArray(res?.data) ? res.data : Array.isArray(res?.sessions) ? res.sessions : Array.isArray(res) ? res : []
+  const rows = Array.isArray(res?.results)
+    ? res.results
+    : Array.isArray(res?.data)
+      ? res.data
+      : Array.isArray(res?.sessions)
+        ? res.sessions
+        : Array.isArray(res)
+          ? res
+          : []
   return rows
     .filter(s => s && typeof s.id === 'string')
     .map(s => ({
       id: s.id,
       title: s.title || '',
-      preview: s.preview || '',
-      started_at: Number(s.started_at) || 0,
-      last_active: Number(s.last_active) || Number(s.started_at) || 0,
+      preview: s.preview || s.snippet || '',
+      started_at: Number(s.started_at) || Number(s.session_started) || 0,
+      last_active: Number(s.last_active) || Number(s.started_at) || Number(s.session_started) || 0,
       message_count: Number(s.message_count) || 0,
       source: s.source || ''
     }))
@@ -822,9 +833,10 @@ function FoldersPane() {
     [profileKey]
   )
 
+  const q = query.trim().toLowerCase()
   const { data: sessions = [], isLoading, isError, isSuccess, refetch, error } = useQuery({
-    queryKey: [PLUGIN_ID, 'sessions', profileKey, connectionId],
-    queryFn: () => fetchSessions(profile, connectionId),
+    queryKey: [PLUGIN_ID, 'sessions', profileKey, connectionId, q],
+    queryFn: () => fetchSessions(profile, connectionId, q),
     refetchInterval: 30_000,
     refetchOnWindowFocus: true
   })
@@ -848,7 +860,6 @@ function FoldersPane() {
     el?.select?.()
   }, [renameTarget])
 
-  const q = query.trim().toLowerCase()
   const filtered = useMemo(
     () => (q ? sessions.filter(s => matchesQuery(s, q)) : sessions),
     [sessions, q]
