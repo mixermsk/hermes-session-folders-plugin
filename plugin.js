@@ -222,15 +222,19 @@ export async function fetchSessions(profile, connectionId, query = '') {
           : []
   return rows
     .filter(s => s && typeof s.id === 'string')
-    .map(s => ({
-      id: s.id,
-      title: s.title || '',
-      preview: s.preview || s.snippet || '',
-      started_at: Number(s.started_at) || Number(s.session_started) || 0,
-      last_active: Number(s.last_active) || Number(s.started_at) || Number(s.session_started) || 0,
-      message_count: Number(s.message_count) || 0,
-      source: s.source || ''
-    }))
+    .map(s => {
+      const workspace = s.workspace || s.cwd || ''
+      return {
+        id: s.id,
+        title: s.title || '',
+        preview: s.preview || s.snippet || '',
+        started_at: Number(s.started_at) || Number(s.session_started) || 0,
+        last_active: Number(s.last_active) || Number(s.started_at) || Number(s.session_started) || 0,
+        message_count: Number(s.message_count) || 0,
+        source: s.source || '',
+        ...(workspace ? { workspace } : {})
+      }
+    })
     .sort((a, b) => b.last_active - a.last_active)
 }
 
@@ -240,40 +244,61 @@ function isAcpSession(session) {
     .toLowerCase() === 'acp'
 }
 
-/**
- * Ensure ACP-sourced sessions land in an "ACP" folder.
- * Creates the folder when missing; only files currently-unfiled sessions
- * (respects a manual Move to another folder).
- */
-function ensureAcpAutoFile(state, sessions) {
-  const acpSessions = sessions.filter(isAcpSession)
-  if (!acpSessions.length) return state
+function normalizeRules(raw) {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(rule => {
+    const workspacePrefix = String(rule?.workspace_prefix || '').trim()
+    const folder = String(rule?.folder || '').trim()
+    return workspacePrefix && folder ? [{ workspacePrefix, folder }] : []
+  })
+}
 
+function autoFolderId(name) {
+  const slug = String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return `f_auto_${slug || 'rule'}`
+}
+
+function matchingRule(session, rules) {
+  const workspace = String(session?.workspace || '').trim()
+  return rules.find(rule => workspace.startsWith(rule.workspacePrefix)) || null
+}
+
+/**
+ * Auto-file ACP and configured workspace sessions. Existing membership always
+ * wins, so a user's manual move is never overwritten by a later refresh.
+ */
+export function applyAutoFileRules(state, sessions, rawRules = []) {
+  const rules = normalizeRules(rawRules)
   let folders = state.folders
   let expanded = state.expanded
   let membership = state.membership
   let changed = false
+  const nextMembership = { ...membership }
+  const folderIdsByName = new Map(folders.map(folder => [String(folder.name || '').trim().toLowerCase(), folder.id]))
 
-  let acpFolder =
-    folders.find(f => f.id === ACP_FOLDER_ID) ||
-    folders.find(f => String(f.name || '').trim().toLowerCase() === 'acp')
-
-  if (!acpFolder) {
-    acpFolder = {
-      id: ACP_FOLDER_ID,
-      name: ACP_FOLDER_NAME,
-      createdAt: Date.now(),
-      order: folders.length
-    }
-    folders = [...folders, acpFolder]
-    expanded = { ...expanded, [acpFolder.id]: true }
+  const ensureFolder = (name, preferredId) => {
+    const normalizedName = String(name || '').trim()
+    const key = normalizedName.toLowerCase()
+    const existingId = folderIdsByName.get(key)
+    if (existingId) return existingId
+    const id = preferredId || autoFolderId(normalizedName)
+    folders = [...folders, { id, name: normalizedName, createdAt: 0, order: folders.length }]
+    folderIdsByName.set(key, id)
+    expanded = { ...expanded, [id]: true }
     changed = true
+    return id
   }
 
-  const nextMembership = { ...membership }
-  for (const s of acpSessions) {
+  for (const s of sessions) {
     if (!nextMembership[s.id]) {
-      nextMembership[s.id] = acpFolder.id
+      const acp = isAcpSession(s)
+      const rule = acp ? null : matchingRule(s, rules)
+      if (!acp && !rule) continue
+      nextMembership[s.id] = ensureFolder(acp ? ACP_FOLDER_NAME : rule.folder, acp ? ACP_FOLDER_ID : null)
       changed = true
     }
   }
@@ -284,6 +309,31 @@ function ensureAcpAutoFile(state, sessions) {
     folders,
     membership: nextMembership,
     expanded
+  }
+}
+
+async function loadRules() {
+  if (typeof _rest !== 'function') return []
+  try {
+    const config = await _rest('/rules')
+    return normalizeRules(config?.rules)
+  } catch (err) {
+    console.warn('[session-folders] rules unavailable; automatic workspace filing disabled', err)
+    return []
+  }
+}
+
+async function loadWorkspaces(sessions) {
+  if (typeof _rest !== 'function' || !sessions.length) return {}
+  try {
+    const result = await _rest('/workspaces', {
+      method: 'POST',
+      body: { session_ids: sessions.map(session => session.id) }
+    })
+    return result?.workspaces && typeof result.workspaces === 'object' ? result.workspaces : {}
+  } catch (err) {
+    console.warn('[session-folders] workspace lookup unavailable; automatic workspace filing disabled', err)
+    return {}
   }
 }
 
@@ -796,6 +846,8 @@ function FoldersPane() {
 
   const [state, setState] = useState(emptyState)
   const [stateReady, setStateReady] = useState(false)
+  const [rules, setRules] = useState([])
+  const [workspaces, setWorkspaces] = useState({})
   const [query, setQuery] = useState('')
   const [dragSessionId, setDragSessionId] = useState(null)
   const [dragFolderId, setDragFolderId] = useState(null)
@@ -822,6 +874,16 @@ function FoldersPane() {
     }
   }, [profileKey, connectionId])
 
+  useEffect(() => {
+    let cancelled = false
+    void loadRules().then(next => {
+      if (!cancelled) setRules(next)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [profileKey])
+
   const persist = useCallback(
     updater => {
       setState(prev => {
@@ -841,13 +903,28 @@ function FoldersPane() {
     refetchOnWindowFocus: true
   })
 
+  useEffect(() => {
+    let cancelled = false
+    void loadWorkspaces(sessions).then(next => {
+      if (!cancelled) setWorkspaces(next)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [sessions])
+
+  const sessionsWithWorkspace = useMemo(
+    () => sessions.map(session => ({ ...session, workspace: workspaces[session.id] || session.workspace || '' })),
+    [sessions, workspaces]
+  )
+
   // Never delete membership from a partial session-list response. The backend
   // may cap that response, while saved memberships must survive indefinitely.
-  // Auto-file ACP sessions only after durable state has loaded.
+  // Auto-file only after durable state and rule data have loaded.
   useEffect(() => {
-    if (!stateReady || !isSuccess || sessions.length === 0) return
-    persist(prev => ensureAcpAutoFile(prev, sessions))
-  }, [sessions, isSuccess, persist, stateReady])
+    if (!stateReady || !isSuccess || sessionsWithWorkspace.length === 0) return
+    persist(prev => applyAutoFileRules(prev, sessionsWithWorkspace, rules))
+  }, [sessionsWithWorkspace, rules, isSuccess, persist, stateReady])
 
   useEffect(() => {
     if (creating) newInputRef.current?.focus?.()
@@ -861,8 +938,8 @@ function FoldersPane() {
   }, [renameTarget])
 
   const filtered = useMemo(
-    () => (q ? sessions.filter(s => matchesQuery(s, q)) : sessions),
-    [sessions, q]
+    () => (q ? sessionsWithWorkspace.filter(s => matchesQuery(s, q)) : sessionsWithWorkspace),
+    [sessionsWithWorkspace, q]
   )
 
   const byFolder = useMemo(() => {

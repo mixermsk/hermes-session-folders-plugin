@@ -25,6 +25,20 @@ For a named profile, use that profile’s Hermes home; its state remains isolate
 
 - Create / rename / delete folders
 - Auto-file ACP sessions into an **ACP** folder (created if missing)
+- Auto-file sessions by workspace rules. On first load the plugin creates
+  `<HERMES_HOME>/plugin-data/session-folders/rules.json` with:
+  ```json
+  {
+    "rules": [
+      {
+        "workspace_prefix": "/Users/mixermsk/repos/",
+        "folder": "Repos"
+      }
+    ]
+  }
+  ```
+  Rules are evaluated in file order; the first matching workspace prefix wins.
+  A manually moved session is never moved again by an automatic rule.
 - **Unfiled** list of sessions from `session.list`
 - Drag a session onto a folder (or back to Unfiled)
 - Drag folders to reorder

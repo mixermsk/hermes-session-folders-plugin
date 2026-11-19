@@ -89,3 +89,32 @@ test('fetchSessions uses the server FTS endpoint for a search query', async () =
     }
   ])
 })
+
+test('workspace rules auto-file only unfiled sessions and preserve manual moves', async () => {
+  const plugin = await loadPlugin({ api: async () => ({ results: [] }) })
+  const state = {
+    folders: [{ id: 'f_manual', name: 'Manual', createdAt: 1, order: 0 }],
+    membership: { 'manual-repo-chat': 'f_manual' },
+    expanded: {}
+  }
+  const sessions = [
+    { id: 'repo-chat', workspace: '/Users/mixermsk/repos/example' },
+    { id: 'manual-repo-chat', workspace: '/Users/mixermsk/repos/example' },
+    { id: 'elsewhere', workspace: '/tmp/example' }
+  ]
+  const rules = [{ workspace_prefix: '/Users/mixermsk/repos/', folder: 'Repos' }]
+
+  const actual = plugin.applyAutoFileRules(state, sessions, rules)
+
+  assert.deepEqual(JSON.parse(JSON.stringify(actual)), {
+    folders: [
+      { id: 'f_manual', name: 'Manual', createdAt: 1, order: 0 },
+      { id: 'f_auto_repos', name: 'Repos', createdAt: 0, order: 1 }
+    ],
+    membership: {
+      'repo-chat': 'f_auto_repos',
+      'manual-repo-chat': 'f_manual'
+    },
+    expanded: { f_auto_repos: true }
+  })
+})
