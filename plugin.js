@@ -354,13 +354,26 @@ function openSession(id) {
 }
 
 /** Same REST door core uses for sidebar archive (PATCH /api/sessions/:id). */
-async function archiveSessionRemote(sessionId, profile) {
+export async function archiveSessionRemote(sessionId, profile) {
   const api = typeof window !== 'undefined' ? window.hermesDesktop?.api : null
   if (typeof api !== 'function') {
     throw new Error('Archive is not available on this desktop build.')
   }
-  const body = { archived: true }
   const prof = String(profile || '').trim()
+  const query = prof ? `?profile=${encodeURIComponent(prof)}` : ''
+  const snapshot = await api({
+    path: `/api/sessions/${encodeURIComponent(sessionId)}/mutation-snapshot${query}`
+  })
+  if (!snapshot?.exists || typeof snapshot.runtime_revision !== 'number') {
+    throw new Error('Session is no longer available for archiving.')
+  }
+  const body = {
+    archived: true,
+    pinned: false,
+    request_id: globalThis.crypto?.randomUUID?.() || `sf-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    expected_revision: snapshot.runtime_revision
+  }
+  if (typeof snapshot.runtime_generation === 'number') body.expected_generation = snapshot.runtime_generation
   if (prof) body.profile = prof
   return api({
     path: `/api/sessions/${encodeURIComponent(sessionId)}`,

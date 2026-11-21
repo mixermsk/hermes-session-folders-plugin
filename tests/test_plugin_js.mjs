@@ -19,6 +19,7 @@ async function loadPlugin({ api }) {
   const context = vm.createContext({
     URLSearchParams,
     console,
+    crypto: { randomUUID: () => 'test-request-id' },
     window: { hermesDesktop: { api } }
   })
   const sdkExports = Object.fromEntries(
@@ -86,6 +87,35 @@ test('fetchSessions uses the server FTS endpoint for a search query', async () =
       last_active: 2,
       message_count: 3,
       source: 'acp'
+    }
+  ])
+})
+
+test('archiveSessionRemote fences the PATCH with a mutation snapshot', async () => {
+  const calls = []
+  const plugin = await loadPlugin({
+    api: async request => {
+      calls.push(request)
+      if (request.method === 'PATCH') return { ok: true }
+      return { exists: true, runtime_revision: 9, runtime_generation: 4 }
+    }
+  })
+
+  await plugin.archiveSessionRemote('session-1', 'default')
+
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    { path: '/api/sessions/session-1/mutation-snapshot?profile=default' },
+    {
+      path: '/api/sessions/session-1',
+      method: 'PATCH',
+      body: {
+        archived: true,
+        pinned: false,
+        profile: 'default',
+        expected_revision: 9,
+        expected_generation: 4,
+        request_id: 'test-request-id'
+      }
     }
   ])
 })
