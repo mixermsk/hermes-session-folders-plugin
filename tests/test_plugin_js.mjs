@@ -73,7 +73,7 @@ test('fetchSessions uses the server FTS endpoint for a search query', async () =
 
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     {
-      path: '/api/sessions/search?q=Ormatek&limit=100&profile=default',
+      path: '/api/sessions/search?q=Ormatek&limit=20&profile=default',
       connectionId: 'local'
     }
   ])

@@ -34,8 +34,10 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 
 const PLUGIN_ID = 'session-folders'
 const LIST_LIMIT = 100
+const SEARCH_LIMIT = 20
 const ACP_FOLDER_ID = 'f_auto_acp'
 const ACP_FOLDER_NAME = 'ACP'
+const SEARCH_DEBOUNCE_MS = 250
 
 /** @type {null | { get: Function, set: Function, remove: Function }} */
 let _storage = null
@@ -200,7 +202,7 @@ export async function fetchSessions(profile, connectionId, query = '') {
   let res
   if (typeof api === 'function') {
     const params = searchQuery
-      ? new URLSearchParams({ q: searchQuery, limit: String(LIST_LIMIT) })
+      ? new URLSearchParams({ q: searchQuery, limit: String(SEARCH_LIMIT) })
       : new URLSearchParams({ limit: String(LIST_LIMIT) })
     const prof = String(profile || '').trim()
     if (prof) params.set('profile', prof)
@@ -849,6 +851,7 @@ function FoldersPane() {
   const [rules, setRules] = useState([])
   const [workspaces, setWorkspaces] = useState({})
   const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [dragSessionId, setDragSessionId] = useState(null)
   const [dragFolderId, setDragFolderId] = useState(null)
   const [renameTarget, setRenameTarget] = useState(null)
@@ -895,12 +898,17 @@ function FoldersPane() {
     [profileKey]
   )
 
-  const q = query.trim().toLowerCase()
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [query])
+
+  const q = debouncedQuery.trim().toLowerCase()
   const { data: sessions = [], isLoading, isError, isSuccess, refetch, error } = useQuery({
     queryKey: [PLUGIN_ID, 'sessions', profileKey, connectionId, q],
     queryFn: () => fetchSessions(profile, connectionId, q),
     refetchInterval: 30_000,
-    refetchOnWindowFocus: true
+    refetchOnWindowFocus: false
   })
 
   useEffect(() => {
@@ -937,10 +945,10 @@ function FoldersPane() {
     el?.select?.()
   }, [renameTarget])
 
-  const filtered = useMemo(
-    () => (q ? sessionsWithWorkspace.filter(s => matchesQuery(s, q)) : sessionsWithWorkspace),
-    [sessionsWithWorkspace, q]
-  )
+  const filtered = useMemo(() => {
+    const typedQuery = query.trim().toLowerCase()
+    return typedQuery ? sessionsWithWorkspace.filter(s => matchesQuery(s, typedQuery)) : sessionsWithWorkspace
+  }, [sessionsWithWorkspace, query])
 
   const byFolder = useMemo(() => {
     const map = {}
